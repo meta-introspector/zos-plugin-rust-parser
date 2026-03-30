@@ -24,3 +24,38 @@ use std::os::raw::c_char;
 }
 
 #[no_mangle] pub extern "C" fn zos_plugin_init() -> i32 { 0 }
+
+#[cfg(test)]
+mod jocko_fuzz {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    fn s(p: *mut c_char) -> String { unsafe { let s = CStr::from_ptr(p).to_string_lossy().into(); zos_free_string(p); s } }
+    fn ex(cmd: &str, arg: &str) -> String {
+        let c = CString::new(cmd).unwrap(); let a = CString::new(arg).unwrap();
+        s(unsafe { zos_plugin_execute(c.as_ptr(), a.as_ptr()) })
+    }
+
+    #[test] fn init() { unsafe { assert_eq!(zos_plugin_init(), 0); } }
+    #[test] fn identity() { assert!(!s(unsafe{zos_plugin_name()}).is_empty()); }
+    #[test] fn render_gui() { assert!(s(unsafe{zos_plugin_render()}).starts_with("[")); }
+
+    #[test] fn fuzz_all_commands() {
+        let cmds = s(unsafe{zos_plugin_commands()});
+        for cmd in cmds.split(',') {
+            for input in &["", "42", "hello", "0", "999999", "{}", "🧮"] {
+                let r = ex(cmd, input);
+                let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+                assert!(v.get("shard").is_some(), "no shard: {}({})", cmd, input);
+            }
+        }
+    }
+
+    #[test] fn da51_valid() {
+        let r = ex(&s(unsafe{zos_plugin_commands()}).split(',').next().unwrap().to_string(), "42");
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert!(v["shard"]["cid"].as_str().unwrap().starts_with("bafk"));
+        assert!(v["shard"]["dasl"].as_str().unwrap().starts_with("0xda51"));
+        assert_eq!(v["shard"]["orbifold"].as_array().unwrap().len(), 3);
+    }
+}
