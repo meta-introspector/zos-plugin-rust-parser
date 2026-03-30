@@ -53,3 +53,50 @@ pub fn to_c(s: &str) -> *mut c_char { CString::new(s).unwrap().into_raw() }
 #[no_mangle] pub extern "C" fn zos_free_string(s: *mut c_char) {
     if !s.is_null() { unsafe { drop(CString::from_raw(s)); } }
 }
+
+// ── State sharing: read/write via DA51 CBOR ─────────────────────
+
+/// Plugin state envelope — serialized as DA51 CBOR for P2P sharing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginState {
+    pub plugin: String,
+    pub version: String,
+    pub fractran_state: u64,
+    pub factors: Vec<(u64, u32)>,
+    pub data: Value,
+    pub shard: DA51Shard,
+    pub timestamp: i64,
+}
+
+impl PluginState {
+    pub fn to_cbor(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).unwrap_or_default();
+        buf
+    }
+    pub fn from_cbor(bytes: &[u8]) -> Option<Self> {
+        ciborium::from_reader(bytes).ok()
+    }
+    pub fn cid(&self) -> String {
+        let cbor = self.to_cbor();
+        let hash = Sha256::digest(&cbor);
+        format!("bafk{}", hex::encode(&hash[..16]))
+    }
+}
+
+/// FRACTRAN step: apply first matching ratio
+pub fn fractran_run(mut state: u64, ratios: &[(Vec<(u64,u32)>, Vec<(u64,u32)>)]) -> u64 {
+    for (num, den) in ratios {
+        let mut s = state;
+        let mut ok = true;
+        for &(p, e) in den { for _ in 0..e { if s % p != 0 { ok = false; break; } s /= p; } if !ok { break; } }
+        if ok { for &(p, e) in num { for _ in 0..e { s *= p; } } return s; }
+    }
+    state
+}
+
+// ── C FFI for state read/write ──────────────────────────────────
+
+#[no_mangle] pub extern "C" fn zos_plugin_state_read() -> *mut c_char { to_c("{}") }
+#[no_mangle] pub extern "C" fn zos_plugin_state_write(_cbor: *const u8, _len: usize) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn zos_plugin_state_cbor(out: *mut u8, max: usize) -> usize { 0 }
